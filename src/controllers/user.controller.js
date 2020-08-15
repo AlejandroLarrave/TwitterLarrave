@@ -1,6 +1,9 @@
 const bcrypt = require("bcrypt");
 const User = require("../models/user.model");
 const Tweet = require("../models/tweet.model");
+const Like = require("../models/likes.model");
+const Reply = require("../models/replyTweet.model");
+const Retweet = require("../models/ReTweet.model");
 const jwt = require("../services/jwt");
 const { getAction } = require("twitter-command");
 
@@ -48,6 +51,9 @@ async function accion(user, { command, args }) {
           return await viewProfile(args);
           break;
         case "like_tweet":
+          return await like(user, args);
+          break;
+        case "dislike_tweet":
           return await like(user, args);
           break;
         case "reply_tweet":
@@ -119,25 +125,35 @@ async function login(args) {
   }
 }
 
-async function AgregarTweet(user, args) {
+const AgregarTweet = async (user, args) => {
   try {
     let newTweet = new Tweet();
+    let like = new Like();
     newTweet.creator = user.sub;
     newTweet.date = new Date();
     newTweet.content = args[0];
 
-    const newTweetAdded = await newTweet.save();
-    if (!newTweetAdded)
+    const reactionSaved = await like.save();
+    if (!reactionSaved) {
       return {
-        message:
-          "Ha ocurrido un error con la subida de tu Tweet, intentalo más tarde",
+        message: "ERROR NO SE PUEDEN GUARDAR LOS LIKES",
       };
-    else return newTweetAdded;
+    } else {
+      newTweet.likes = reactionSaved._id;
+      const newTweetAdded = await (await newTweet.save())
+        .populate("creator", "-password -following -followers -name -email")
+        .populate("likes", "-_id -interactors")
+        .execPopulate();
+      if (!newTweetAdded) return { message: "ERROR AL AGREGAR EL TWEET" };
+      else {
+        return newTweetAdded;
+      }
+    }
   } catch (err) {
     console.log(err);
-    return { message: "Error general" };
+    return { message: "ERROR EN EL SERVIDOR" };
   }
-}
+};
 
 async function UpdateAndDelete(user, args, operation) {
   try {
@@ -180,37 +196,55 @@ async function UpdateAndDelete(user, args, operation) {
   }
 }
 
-async function DeleteTweet(argumentos) {
-  try {
-    const tweet = await Tweet.findById(argumentos[0]);
-    if (!tweet) return { message: "Tweet no encontrado" };
-    else return { message: "Tweet Elimando" };
-  } catch (err) {
-    console.log(err);
-    return { message: "Error general" };
-  }
-}
-
 async function viewTweets(args) {
   try {
-    const userFound = await User.findOne({ username: args[0] });
-    if (!userFound)
-      return { message: "El usuario con este nombre no existe, verificalo" };
-    else {
-      const tweets = await Tweet.find({ creator: userFound._id }).populate(
-        "creator",
-        "-_id username"
-      );
-      if (!tweets) return { message: "Ha sido imposible recibir los tweets" };
-      else if (tweets.length === 0)
-        return { message: `${userFound.username}¡Aún no tienes tweets!` };
-      else return tweets;
+    if (args[0] === "*") {
+      const allTweets = await Tweet.find({})
+        .populate("creator", "-password -following -followers -name -email")
+        .populate("likes", "-_id -interactors")
+        .populate("replies", "-_id");
+      if (!allTweets) return { message: "Unable to get tweets" };
+      else return allTweets;
+    } else {
+      const userFound = await User.findOne({ username: args[0] });
+      if (!userFound)
+        return { message: "The user with that username doesn't exist" };
+      else {
+        const tweets = await Tweet.find({ creator: userFound._id })
+          .populate("creator", "username")
+          .populate("likes", "-_id -interactors")
+          .populate([
+            {
+              path: "replies",
+              select: "-_id",
+              populate: {
+                path: "author",
+                select: "-_id -password -following -followers -name -email",
+              },
+            },
+          ])
+          .populate([
+            {
+              path: "retweets",
+              select: "-_id",
+              populate: {
+                path: "creator",
+                select: "-_id -password -following -followers -name -email",
+              },
+            },
+          ]);
+
+        if (!tweets) return { message: "Unable to get tweets" };
+        else if (tweets.length === 0)
+          return { message: `${userFound.username} doesn't have tweets yet.` };
+        else return tweets;
+      }
     }
   } catch (err) {
     console.log(err);
-    return { message: "Error general" };
+    return { message: "Internal server Error" };
   }
-}
+};
 
 async function followUser(user, args) {
   try {
@@ -294,9 +328,9 @@ async function generatePassword(password) {
   });
 }
 
-async function viewProfile(argumentos) {
+async function viewProfile(args) {
   try {
-    const profile = await User.findOne({ username: argumentos[0] })
+    const profile = await User.findOne({ username: args[0] })
     .select("username _id")
       .populate("following", "-name -email -password -following -followers")
       .populate("followers", "-name -email -password -following -followers");
@@ -310,7 +344,7 @@ async function viewProfile(argumentos) {
   }
 }
 
-const doLike = async (id, userId) => {
+async function doLike(id, userId) {
   try {
     const liked = await Like.findOneAndUpdate(
       { _id: id },
@@ -320,11 +354,14 @@ const doLike = async (id, userId) => {
     else return { message: "Ahora te gusta este Tweet :)" };
   } catch (err) {
     console.log(err);
+
+
+
     return { message: "Error general" };
   }
 };
 
-const dislike = async (id, userId) => {
+async function dislike (id, userId) {
   try {
     const disliked = await Like.findOneAndUpdate(
       { _id: id },
@@ -338,7 +375,7 @@ const dislike = async (id, userId) => {
   }
 };
 
-const like = async (user, args) => {
+async function like (user, args) {
   try {
     const tweet = await Tweet.findById(args[0]);
     if (!tweet) return { message: "El Tweet que buscas no existe, verificalo :)" };
@@ -347,7 +384,7 @@ const like = async (user, args) => {
         $and: [{ _id: tweet.likes }, { interactors: { _id: user.sub } }],
       });
       if (!previusReactions) {
-        const toLike = await Like.findById(tweet.likes);
+        const toLike = await Like.findById(tweet.likes);        
         return await doLike(toLike._id, user.sub);
       } else return await dislike(previusReactions._id, user.sub);
     }
@@ -357,7 +394,7 @@ const like = async (user, args) => {
   }
 };
 
-const reply = async (user, args) => {
+async function reply (user, args) {
   try {
     const newReply = new Reply();
     const tweetFound = await Tweet.findById(args[1]);
@@ -403,7 +440,7 @@ const reply = async (user, args) => {
   }
 };
 
-const retweet = async (user, args) => {
+async function retweet (user, args) {
   try {
     const tweetExists = await Tweet.findById(args[1]);
     if (!tweetExists) return { message: "El Tweet que buscas no existe, verificalo :)" };

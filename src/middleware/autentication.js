@@ -2,7 +2,7 @@
 const jwt = require("jwt-simple");
 const moment = require("moment");
 const { needsMiddleware } = require('twitter-command');
-const key = "clave super secreta";
+const key = "ClaveSecreta";
 
 exports.ensureAuth = (req, res, next) => {
   if (needsMiddleware(req)) {
